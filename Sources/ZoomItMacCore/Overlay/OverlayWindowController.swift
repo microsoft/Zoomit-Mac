@@ -8,6 +8,8 @@ private final class OverlayWindow: NSWindow {
 @MainActor
 final class OverlayWindowController {
     private let userSelectedResourceAccess: UserSelectedResourceAccess
+    private let settingsStore: SettingsStore
+    private let permissionService: PermissionService
     private var window: NSWindow?
     private weak var canvasView: ZoomCanvasView?
     private var viewportController: ZoomViewportController?
@@ -20,8 +22,14 @@ final class OverlayWindowController {
     // while keeping ZoomIt's 1.1x/0.8x per-step factors.
     private static let zoomStepInterval: TimeInterval = 1.0 / 30.0
 
-    init(userSelectedResourceAccess: UserSelectedResourceAccess) {
+    init(
+        userSelectedResourceAccess: UserSelectedResourceAccess,
+        settingsStore: SettingsStore,
+        permissionService: PermissionService
+    ) {
         self.userSelectedResourceAccess = userSelectedResourceAccess
+        self.settingsStore = settingsStore
+        self.permissionService = permissionService
     }
 
     func show(
@@ -65,6 +73,8 @@ final class OverlayWindowController {
             annotationController: annotationController,
             smoothImage: smoothImage,
             userSelectedResourceAccess: userSelectedResourceAccess,
+            settingsStore: settingsStore,
+            permissionService: permissionService,
             commandSink: commandSink
         )
         window.contentView = canvasView

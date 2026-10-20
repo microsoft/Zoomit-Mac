@@ -31,6 +31,7 @@ brew uninstall --cask zoomit
 - Draw-without-zoom mode for annotating the screen at 1x.
 - Pen, line, rectangle, ellipse, arrow, highlighter, undo, erase, blank-screen sketch pads, and typing annotations.
 - Viewport screenshot copy/save and region snip copy/save.
+- Optional snip dictation that records speech during a clipboard snip and copies the image and transcript together.
 - OCR snip: select a screen region and copy its recognized text to the clipboard.
 - Break timer with a configurable countdown, colors, opacity, background, and optional sound.
 - MP4 screen recording for the whole screen or a selected region, with optional system audio, microphone audio, and fixed webcam picture-in-picture.
@@ -44,7 +45,7 @@ brew uninstall --cask zoomit
 - macOS 14 or newer.
 - Xcode command-line tools.
 - Screen Recording permission for capture.
-- Microphone and Camera permissions are required only for those recording options.
+- Microphone and Speech Recognition permissions are required only for microphone recording and optional snip dictation; Camera is required only for the webcam option.
 
 ## Build, Test, Run
 
@@ -101,6 +102,12 @@ All global hotkeys are configurable in Settings. While zoomed, use `Option+Up` a
 
 Press the snip shortcut (`Control+6`) and drag a rectangle to copy that region of the screen to the clipboard; hold `Shift` (`Control+Shift+6`) to save it to a PNG file instead. Snip also works while zoomed, capturing the magnified view.
 
+Snip dictation is off by default and can be enabled on the Snip tab in Settings. During a clipboard snip, press `Space` once while actively dragging to start listening. Releasing the mouse keeps the selection and status badge visible while transcription finishes; press `Esc` to cancel without replacing the clipboard. Extra or auto-repeated Space presses do not restart dictation.
+
+On success, ZoomIt writes one multi-representation clipboard item. Its RTFD and HTML forms contain both the image and transcript, with PNG, TIFF, and plain-text fallbacks so each destination app can choose the format it supports. An empty transcript produces the same PNG/TIFF image-only payload as a normal snip. ZoomIt does not intercept paste or synthesize paste events, so this feature does not require Accessibility or Input Monitoring permission.
+
+Dictation uses Apple's Speech and AVFoundation frameworks, prefers on-device recognition when the selected language supports it, and otherwise uses Apple's normal recognizer. It shares the configured recording microphone selection (falling back to the system default if the saved device is missing), but enabling microphone audio in recordings and enabling snip dictation are independent.
+
 Press the OCR shortcut (`Control+Option+6`) and drag a rectangle to recognize the text inside it and copy that text to the clipboard. OCR uses Apple's on-device Vision text recognition, runs entirely on-device, and needs no extra permissions. Both shortcuts are configurable on the Snip tab in Settings.
 
 ## Recording
@@ -115,7 +122,7 @@ Panorama capture records a selected scroll region while you scroll, then stitche
 
 ## Settings And Permissions
 
-Settings are saved immediately to `UserDefaults`. The app includes permission checks for Screen Recording, Microphone, and Camera. Running from SwiftPM is supported for development; launch at login and production distribution are intended for the bundled app form.
+Settings are saved immediately to `UserDefaults`. The app includes permission checks for Screen Recording, Microphone, Speech Recognition, and Camera. Snip dictation requests only Microphone and Speech Recognition; it does not use Accessibility or Input Monitoring. Running from SwiftPM is supported for development; launch at login and production distribution are intended for the bundled app form.
 
 ## Distributing To Testers
 
@@ -173,7 +180,7 @@ Settings if macOS reports that its authorization can no longer be restored.
 Screen recording remains controlled by macOS privacy consent and has no app
 entitlement. 
 
-By default this produces `.build/ZoomIt (Dev).app` with the app icon, bundled resources, and an `Info.plist` declaring the microphone and camera usage descriptions. `release` builds are **Universal** (Apple Silicon + Intel) by default; `debug` builds are native to the build machine for speed. Override the architectures with `ZOOMIT_ARCHS` (e.g. `ZOOMIT_ARCHS=arm64`). A Universal build routes through Xcode's build system, so it requires a **full Xcode** install — with only the Command Line Tools the script warns and falls back to a native build. The build summary prints the resulting architectures.
+By default this produces `.build/ZoomIt (Dev).app` with the app icon, bundled resources, and an `Info.plist` declaring the microphone, Speech Recognition, and camera usage descriptions. `release` builds are **Universal** (Apple Silicon + Intel) by default; `debug` builds are native to the build machine for speed. Override the architectures with `ZOOMIT_ARCHS` (e.g. `ZOOMIT_ARCHS=arm64`). A Universal build routes through Xcode's build system, so it requires a **full Xcode** install — with only the Command Line Tools the script warns and falls back to a native build. The build summary prints the resulting architectures.
 
 ### Create and install a local development DMG
 
@@ -218,9 +225,9 @@ A `.dmg` is a disk image, not an executable; use `open path/to/file.dmg` rather 
 
 Override any field explicitly with `ZOOMIT_SIGN_IDENTITY`, `ZOOMIT_BUNDLE_ID`, and `ZOOMIT_DISPLAY_NAME`. Because a real signing identity has a stable, team-based designated requirement, the official app keeps its Screen Recording permission across updates; an ad-hoc build cannot share that grant since contributors don't have the certificate.
 
-### Entitlements (camera & microphone)
+### Entitlements (camera, microphone, and Speech Recognition)
 
-`build-app.sh` signs the bundle with `Scripts/ZoomIt.entitlements`, which grants `com.apple.security.device.camera` and `com.apple.security.device.audio-input`. Under the hardened runtime (used by notarized builds) these are **required** for the webcam overlay and microphone recording — without them macOS denies both even after the user approves the TCC prompt. Screen Recording is pure TCC and needs no entitlement. The entitlements are embedded even for ad-hoc builds so that when the official pipeline re-signs the bundle with ESRP (`MacAppDeveloperSign`), the existing entitlements are preserved. Verify on the first signed build with `codesign -d --entitlements :- ZoomIt.app`.
+`build-app.sh` signs both Homebrew and App Store variants with camera/audio-input access plus `com.apple.developer.speech-recognition`. These are required for the webcam, microphone capture, and Apple Speech transcription under their respective distribution constraints. Screen Recording is pure TCC and needs no entitlement. The entitlements are embedded even for ad-hoc builds so that when the official pipeline re-signs the bundle with ESRP (`MacAppDeveloperSign`), the existing entitlements are preserved. Verify on the first signed build with `codesign -d --entitlements :- ZoomIt.app`.
 
 ### Signing options
 
@@ -250,7 +257,7 @@ Override any field explicitly with `ZOOMIT_SIGN_IDENTITY`, `ZOOMIT_BUNDLE_ID`, a
 
 1. Move `ZoomIt (Dev).app` (local testing) or `ZoomIt.app` (official release) to `/Applications` and open it. It runs as a menu-bar item (no Dock icon).
 2. macOS prompts for **Screen Recording** the first time a capture feature is used; enable the matching **ZoomIt (Dev)** or **ZoomIt** row in System Settings ▸ Privacy & Security ▸ Screen Recording, then relaunch that same app.
-3. **Microphone** and **Camera** are only requested when those recording options are enabled.
+3. **Microphone** and **Speech Recognition** are requested when snip dictation is enabled; **Microphone** and **Camera** are otherwise requested only when their recording options are enabled.
 4. Use the menu-bar icon or the default hotkeys above to drive the app, and the Settings dialog to customize shortcuts and behavior.
 
 ### Clear stale Screen Recording permissions

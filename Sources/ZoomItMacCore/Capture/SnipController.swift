@@ -69,9 +69,16 @@ final class SnipSelectionView: NSView {
     /// Called with the selected rectangle in view points (top-left origin), or
     /// nil if the selection was cancelled or empty.
     var onComplete: ((CGRect?) -> Void)?
+    var onDictationRequested: (() -> Void)?
+    var dictationEnabled = false
+    var dictationBadge: SnipDictationBadge? {
+        didSet { needsDisplay = true }
+    }
 
     private var anchorPoint: CGPoint?
     private var selectionRect: CGRect = .zero
+    private var dictationKeyGate = SnipDictationKeyGate()
+    private var selectionLocked = false
 
     init(frame frameRect: CGRect, image: CGImage, borderColor: NSColor = .white) {
         self.image = image
@@ -135,6 +142,10 @@ final class SnipSelectionView: NSView {
         context.setStrokeColor(borderColor.cgColor)
         context.setLineWidth(1)
         context.stroke(selectionRect.insetBy(dx: 0.5, dy: 0.5))
+
+        if let dictationBadge {
+            SnipDictationBadgeLayout.draw(dictationBadge, selection: selectionRect, in: bounds)
+        }
     }
 
     private func drawImage(in context: CGContext) {
@@ -146,13 +157,15 @@ final class SnipSelectionView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        guard !selectionLocked else { return }
         anchorPoint = convert(event.locationInWindow, from: nil)
         selectionRect = .zero
+        dictationKeyGate.beginSelection()
         needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let anchor = anchorPoint else { return }
+        guard !selectionLocked, let anchor = anchorPoint else { return }
         let point = convert(event.locationInWindow, from: nil)
         selectionRect = CGRect(
             x: min(anchor.x, point.x),
@@ -160,12 +173,15 @@ final class SnipSelectionView: NSView {
             width: abs(point.x - anchor.x),
             height: abs(point.y - anchor.y)
         )
+        dictationKeyGate.noteDrag()
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard !selectionLocked else { return }
         let rect = selectionRect
         anchorPoint = nil
+        dictationKeyGate.endDrag()
         // Ignore an accidental click/tiny drag.
         onComplete?(rect.width >= 3 && rect.height >= 3 ? rect : nil)
     }
@@ -173,7 +189,21 @@ final class SnipSelectionView: NSView {
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // Escape cancels.
             onComplete?(nil)
+        } else if dictationKeyGate.shouldStart(
+            keyCode: event.keyCode,
+            isRepeat: event.isARepeat,
+            isEnabled: dictationEnabled,
+            isClipboardSnip: true
+        ) {
+            onDictationRequested?()
         }
+    }
+
+    func lockSelectionForDictationFinalization() {
+        selectionLocked = true
+        anchorPoint = nil
+        dictationKeyGate.endDrag()
+        needsDisplay = true
     }
 
     /// Renders the selector with a fixed selection rectangle into a bitmap so
@@ -209,6 +239,11 @@ final class SnipController {
     private var action: SnipAction = .copyImage
     private var onFinished: (() -> Void)?
     private var cursorLease: CrosshairCursorLease?
+    private weak var selectionView: SnipSelectionView?
+    private var dictationSession: SnipDictationSession?
+    private var pendingDictationImage: CGImage?
+    private var errorDismissTask: Task<Void, Never>?
+    private var dictationGeneration = 0
 
     init(
         captureService: ScreenCaptureService,
@@ -233,6 +268,12 @@ final class SnipController {
     func begin(action: SnipAction, frame providedFrame: CapturedFrame? = nil, onFinished: @escaping () -> Void) {
         self.action = action
         self.onFinished = onFinished
+        dictationSession?.cancel()
+        dictationSession = nil
+        pendingDictationImage = nil
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
+        dictationGeneration += 1
 
         if let providedFrame {
             show(frame: providedFrame)
@@ -279,6 +320,12 @@ final class SnipController {
             frame: CGRect(origin: .zero, size: frame.display.frame.size),
             image: frame.image
         )
+        if case .copyImage = action {
+            view.dictationEnabled = settingsStore.load().snipDictationEnabled
+        }
+        view.onDictationRequested = { [weak self] in
+            self?.startDictation()
+        }
         view.onComplete = { [weak self] rect in
             self?.handleSelection(rect)
         }
@@ -289,15 +336,16 @@ final class SnipController {
         let cursorLease = CrosshairCursorLease(window: window)
         cursorLease.activate()
         self.cursorLease = cursorLease
+        self.selectionView = view
         self.window = window
     }
 
     private func handleSelection(_ rect: CGRect?) {
         let frame = capturedFrame
-        // Tear down the overlay first so a Save dialog isn't hidden behind it.
-        closeWindow()
 
         guard let rect, let frame else {
+            cancelDictation()
+            closeWindow()
             finish()
             return
         }
@@ -311,23 +359,78 @@ final class SnipController {
         ).integral
 
         guard let cropped = frame.image.cropping(to: pixelRect) else {
+            cancelDictation()
+            closeWindow()
             finish()
             return
         }
 
         switch action {
         case .saveImage:
+            closeWindow()
             ImageExporter.saveImage(
                 cropped,
                 settings: settingsStore.load(),
                 userSelectedResourceAccess: userSelectedResourceAccess
             )
         case .copyImage:
+            if let dictationSession {
+                pendingDictationImage = cropped
+                selectionView?.lockSelectionForDictationFinalization()
+                dictationSession.stopAndFinalize { [weak self] result in
+                    self?.completeDictation(result)
+                }
+                return
+            }
+            closeWindow()
             ImageExporter.copyToPasteboard(cropped)
         case .recognizeText:
+            closeWindow()
             OcrService.recognizeAndCopy(cropped)
         }
         finish()
+    }
+
+    private func startDictation() {
+        guard dictationSession == nil else { return }
+        let session = SnipDictationSession(permissionService: permissionService)
+        session.onBadgeChange = { [weak self] badge in
+            self?.selectionView?.dictationBadge = badge
+        }
+        dictationSession = session
+        session.start(deviceID: settingsStore.load().microphoneDeviceID)
+    }
+
+    private func completeDictation(_ result: Result<String, SnipDictationFailure>) {
+        guard let image = pendingDictationImage else { return }
+        switch result {
+        case .success(let transcript):
+            let normalized = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            pendingDictationImage = nil
+            closeWindow()
+            ImageExporter.copyToPasteboard(image, transcript: normalized)
+            finish()
+        case .failure(let failure):
+            selectionView?.dictationBadge = .error(failure.message)
+            let generation = dictationGeneration
+            errorDismissTask?.cancel()
+            errorDismissTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self, self.dictationGeneration == generation else { return }
+                self.pendingDictationImage = nil
+                self.closeWindow()
+                self.finish()
+            }
+        }
+    }
+
+    private func cancelDictation() {
+        dictationGeneration += 1
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
+        pendingDictationImage = nil
+        dictationSession?.cancel()
+        dictationSession = nil
     }
 
     private func closeWindow() {
@@ -335,9 +438,15 @@ final class SnipController {
         cursorLease = nil
         window?.orderOut(nil)
         window = nil
+        selectionView = nil
     }
 
     private func finish() {
+        errorDismissTask?.cancel()
+        errorDismissTask = nil
+        dictationSession?.cancel()
+        dictationSession = nil
+        pendingDictationImage = nil
         capturedFrame = nil
         let callback = onFinished
         onFinished = nil

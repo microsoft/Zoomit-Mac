@@ -106,6 +106,9 @@ struct AppSettings: Equatable {
     /// it is saved to a file. On by default so a saved snip is always available
     /// to paste.
     var copySnipToClipboardOnSave: Bool
+    /// Whether pressing Space once during a clipboard snip drag records speech
+    /// and publishes its transcript alongside the selected image.
+    var snipDictationEnabled: Bool
     /// Whether saving a snip/screenshot writes directly to `snipSaveDirectory`
     /// with an auto-generated name instead of presenting a Save dialog.
     var saveSnipToDirectory: Bool
@@ -189,6 +192,7 @@ struct AppSettings: Equatable {
         webcamSize: 1,
         webcamShape: 0,
         copySnipToClipboardOnSave: true,
+        snipDictationEnabled: false,
         saveSnipToDirectory: false,
         snipSaveDirectory: ""
     )
@@ -255,6 +259,7 @@ final class UserDefaultsSettingsStore: SettingsStore {
         static let webcamSize = "webcamSize"
         static let webcamShape = "webcamShape"
         static let copySnipToClipboardOnSave = "copySnipToClipboardOnSave"
+        static let snipDictationEnabled = "snipDictationEnabled"
         static let saveSnipToDirectory = "saveSnipToDirectory"
         static let snipSaveDirectory = "snipSaveDirectory"
         static let hasCompletedFirstLaunch = "hasCompletedFirstLaunch"
@@ -515,6 +520,10 @@ final class UserDefaultsSettingsStore: SettingsStore {
             settings.copySnipToClipboardOnSave = defaults.bool(forKey: Key.copySnipToClipboardOnSave)
         }
 
+        if defaults.object(forKey: Key.snipDictationEnabled) != nil {
+            settings.snipDictationEnabled = defaults.bool(forKey: Key.snipDictationEnabled)
+        }
+
         if defaults.object(forKey: Key.saveSnipToDirectory) != nil {
             settings.saveSnipToDirectory = defaults.bool(forKey: Key.saveSnipToDirectory)
         }
@@ -581,6 +590,7 @@ final class UserDefaultsSettingsStore: SettingsStore {
         defaults.set(settings.webcamSize, forKey: Key.webcamSize)
         defaults.set(settings.webcamShape, forKey: Key.webcamShape)
         defaults.set(settings.copySnipToClipboardOnSave, forKey: Key.copySnipToClipboardOnSave)
+        defaults.set(settings.snipDictationEnabled, forKey: Key.snipDictationEnabled)
         defaults.set(settings.saveSnipToDirectory, forKey: Key.saveSnipToDirectory)
         defaults.set(settings.snipSaveDirectory, forKey: Key.snipSaveDirectory)
     }

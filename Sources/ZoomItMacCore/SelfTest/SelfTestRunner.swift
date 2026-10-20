@@ -40,6 +40,10 @@ public enum SelfTestRunner {
         try testTypingAnnotations()
         try testAnnotationRenderingTouchesPixels()
         try testSettingsRoundTrip()
+        try testSnipDictationStateFinalization()
+        try testSnipDictationKeyHandling()
+        try testSnipDictationPasteboardPayload()
+        try testSnipDictationBadgeLayout()
         try testFirstLaunchFlag()
         #if !ZOOMIT_APP_STORE
         try testDemoTypeSettingsRoundTrip()
@@ -313,6 +317,7 @@ public enum SelfTestRunner {
         settings.recordSystemAudio = true
         settings.recordMicrophone = true
         settings.microphoneDeviceID = "test-mic-id"
+        settings.snipDictationEnabled = true
         settings.webcamEnabled = true
         settings.webcamDeviceID = "test-cam-id"
         settings.webcamPosition = 1
@@ -323,6 +328,117 @@ public enum SelfTestRunner {
         try expect(store.load() == settings, "Expected saved settings to round-trip through the store")
 
         defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    private static func testSnipDictationStateFinalization() throws {
+        try expect(!AppSettings.defaults.snipDictationEnabled, "Expected snip dictation to default off")
+
+        var quickRelease = SnipDictationStateMachine()
+        try expect(quickRelease.requestStart(), "Expected an idle dictation session to start")
+        try expect(quickRelease.phase == .preparing, "Expected dictation to enter preparing")
+        try expect(
+            quickRelease.requestFinalization() == .waitForPreparation,
+            "Expected mouse-up during preparation to queue finalization"
+        )
+        try expect(quickRelease.phase == .finalizing, "Expected queued finalization to stay visible")
+        try expect(quickRelease.didPrepare(), "Expected queued mouse-up to end audio as soon as preparation finishes")
+
+        var normalRelease = SnipDictationStateMachine()
+        try expect(normalRelease.requestStart(), "Expected a second dictation session to start")
+        try expect(!normalRelease.didPrepare(), "Expected prepared dictation to listen while the drag remains active")
+        try expect(normalRelease.phase == .listening, "Expected prepared dictation to enter listening")
+        try expect(
+            normalRelease.requestFinalization() == .stopAudio,
+            "Expected mouse-up while listening to stop audio and finalize"
+        )
+    }
+
+    private static func testSnipDictationKeyHandling() throws {
+        var gate = SnipDictationKeyGate()
+        gate.beginSelection()
+        try expect(
+            !gate.shouldStart(keyCode: 49, isRepeat: false, isEnabled: true, isClipboardSnip: true),
+            "Expected Space before an active drag to be ignored"
+        )
+        gate.noteDrag()
+        try expect(
+            !gate.shouldStart(keyCode: 49, isRepeat: true, isEnabled: true, isClipboardSnip: true),
+            "Expected auto-repeat Space to be ignored"
+        )
+        try expect(
+            gate.shouldStart(keyCode: 49, isRepeat: false, isEnabled: true, isClipboardSnip: true),
+            "Expected one non-repeat Space during a clipboard drag to start dictation"
+        )
+        try expect(
+            !gate.shouldStart(keyCode: 49, isRepeat: false, isEnabled: true, isClipboardSnip: true),
+            "Expected extra Space presses not to restart dictation"
+        )
+
+        gate.beginSelection()
+        gate.noteDrag()
+        try expect(
+            !gate.shouldStart(keyCode: 49, isRepeat: false, isEnabled: false, isClipboardSnip: true),
+            "Expected disabled dictation to ignore Space"
+        )
+        try expect(
+            !gate.shouldStart(keyCode: 49, isRepeat: false, isEnabled: true, isClipboardSnip: false),
+            "Expected save and OCR snips to ignore dictation Space"
+        )
+    }
+
+    private static func testSnipDictationPasteboardPayload() throws {
+        let image = try makeFrame().image
+        guard let richItem = ImageExporter.makePasteboardItem(
+            image: image,
+            transcript: "Dictated <text> & details"
+        ) else {
+            throw SelfTestError.failure("Expected rich snip pasteboard item")
+        }
+        let richTypes = Set(richItem.types)
+        for type in [NSPasteboard.PasteboardType.rtfd, .html, .png, .tiff, .string] {
+            try expect(richTypes.contains(type), "Expected rich snip pasteboard type \(type.rawValue)")
+        }
+        try expect(
+            richItem.data(forType: .rtfd)?.isEmpty == false,
+            "Expected RTFD to contain the snip image and transcript"
+        )
+        let html = richItem.string(forType: .html) ?? ""
+        try expect(
+            html.contains("data:image/png;base64,") && html.contains("Dictated &lt;text&gt; &amp; details"),
+            "Expected HTML to embed the image and escaped transcript"
+        )
+
+        guard let imageOnlyItem = ImageExporter.makePasteboardItem(image: image, transcript: "") else {
+            throw SelfTestError.failure("Expected image-only snip pasteboard item")
+        }
+        try expect(
+            Set(imageOnlyItem.types) == Set([NSPasteboard.PasteboardType.png, .tiff]),
+            "Expected empty transcription to match a normal PNG/TIFF image-only snip"
+        )
+
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("ZoomItMacSelfTest.\(UUID().uuidString)"))
+        ImageExporter.copyToPasteboard(image, transcript: "One item", pasteboard: pasteboard)
+        try expect(pasteboard.pasteboardItems?.count == 1, "Expected one multi-representation pasteboard item")
+        pasteboard.clearContents()
+    }
+
+    private static func testSnipDictationBadgeLayout() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 500, height: 300)
+        let badgeSize = CGSize(width: 180, height: 32)
+        let below = SnipDictationBadgeLayout.frame(
+            selection: CGRect(x: 120, y: 60, width: 160, height: 80),
+            container: bounds,
+            badgeSize: badgeSize
+        )
+        try expect(below.minY > 140, "Expected the dictation badge below a selection with available space")
+
+        let above = SnipDictationBadgeLayout.frame(
+            selection: CGRect(x: 420, y: 260, width: 70, height: 30),
+            container: bounds,
+            badgeSize: badgeSize
+        )
+        try expect(above.maxY < 260, "Expected the dictation badge above a bottom-edge selection")
+        try expect(above.maxX <= bounds.maxX - 8, "Expected the dictation badge to stay within the right edge")
     }
 
     private static func testFirstLaunchFlag() throws {

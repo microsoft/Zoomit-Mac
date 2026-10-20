@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Speech
 
 struct PermissionStatus: Equatable {
     var isGranted: Bool
@@ -7,6 +8,14 @@ struct PermissionStatus: Equatable {
 
 /// Tri-state microphone permission, matching the system's authorization states.
 enum MicrophonePermission: Equatable {
+    case granted
+    case denied
+    case notDetermined
+}
+
+/// Tri-state Speech Recognition permission, matching the system authorization
+/// states exposed by `SFSpeechRecognizer`.
+enum SpeechRecognitionPermission: Equatable {
     case granted
     case denied
     case notDetermined
@@ -23,6 +32,9 @@ protocol PermissionService {
     func microphoneStatus() -> MicrophonePermission
     func requestMicrophoneAccess(completion: (@MainActor @Sendable () -> Void)?)
     func openMicrophoneSettings()
+    func speechRecognitionStatus() -> SpeechRecognitionPermission
+    func requestSpeechRecognitionAccess(completion: (@MainActor @Sendable () -> Void)?)
+    func openSpeechRecognitionSettings()
     func cameraStatus() -> MicrophonePermission
     func requestCameraAccess(completion: (@MainActor @Sendable () -> Void)?)
     func openCameraSettings()
@@ -65,6 +77,29 @@ final class SystemPermissionService: PermissionService {
 
     func openMicrophoneSettings() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func speechRecognitionStatus() -> SpeechRecognitionPermission {
+        switch SFSpeechRecognizer.authorizationStatus() {
+        case .authorized:
+            return .granted
+        case .notDetermined:
+            return .notDetermined
+        default:
+            return .denied
+        }
+    }
+
+    func requestSpeechRecognitionAccess(completion: (@MainActor @Sendable () -> Void)? = nil) {
+        SFSpeechRecognizer.requestAuthorization { _ in
+            guard let completion else { return }
+            Task { @MainActor in completion() }
+        }
+    }
+
+    func openSpeechRecognitionSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition") else { return }
         NSWorkspace.shared.open(url)
     }
 
