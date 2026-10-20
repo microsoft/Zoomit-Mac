@@ -1,63 +1,62 @@
 import CoreGraphics
+import Foundation
 
 @MainActor
 final class ZoomViewportController {
     private(set) var zoomFactor: CGFloat = 1
     private(set) var targetZoomFactor: CGFloat = 2
-    private var telescopeStep: CGFloat = 0
+    private var animation = ZoomAnimation()
+    private let clock: () -> TimeInterval
     private(set) var capturedFrame: CapturedFrame?
 
-    // Matches ZoomIt's ZOOM_LEVEL_STEP_IN / ZOOM_LEVEL_STEP_OUT telescope factors.
-    private static let stepIn: CGFloat = 1.1
-    private static let stepOut: CGFloat = 0.8
+    init(clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.clock = clock
+    }
 
     func configure(for frame: CapturedFrame, initialZoom: CGFloat) {
         capturedFrame = frame
         targetZoomFactor = Self.clampZoom(initialZoom)
         zoomFactor = targetZoomFactor
-        telescopeStep = 0
+        animation.stop(at: Double(zoomFactor))
     }
 
     func setZoomFactor(_ factor: CGFloat) {
         zoomFactor = Self.clampZoom(factor)
         targetZoomFactor = zoomFactor
-        telescopeStep = 0
+        animation.stop(at: Double(zoomFactor))
     }
 
-    /// Restarts the displayed zoom at 1x so it can telescope back in to the
-    /// configured target, matching ZoomIt's zoom-in animation on activation.
     func beginZoomInAnimation() {
         zoomFactor = 1
-        telescopeStep = targetZoomFactor > 1 ? Self.stepIn : 0
+        animation.start(
+            from: 1,
+            to: Double(targetZoomFactor),
+            at: clock(),
+            duration: ZoomAnimation.duration(from: 1, to: Double(targetZoomFactor), firstStepWasImmediate: true)
+        )
     }
 
-    /// Sets a new target and chooses the telescope direction for animation.
-    func animateZoom(to factor: CGFloat) {
+    func animateZoom(to factor: CGFloat, firstStepWasImmediate: Bool = false) {
+        let time = clock()
+        let currentZoom = animation.sample(at: time)
         targetZoomFactor = Self.clampZoom(factor)
-        if targetZoomFactor > zoomFactor {
-            telescopeStep = Self.stepIn
-        } else if targetZoomFactor < zoomFactor {
-            telescopeStep = Self.stepOut
-        } else {
-            telescopeStep = 0
-        }
+        zoomFactor = CGFloat(animation.retarget(
+            to: Double(targetZoomFactor),
+            at: time,
+            duration: ZoomAnimation.duration(
+                from: currentZoom,
+                to: Double(targetZoomFactor),
+                firstStepWasImmediate: firstStepWasImmediate
+            )
+        ))
     }
 
-    var isAnimatingZoom: Bool { telescopeStep != 0 }
+    var isAnimatingZoom: Bool { animation.isActive }
 
-    /// Advances the telescope by one step. Returns `true` while still animating.
     @discardableResult
     func advanceZoomAnimation() -> Bool {
-        guard telescopeStep != 0 else { return false }
-
-        zoomFactor *= telescopeStep
-        if (telescopeStep > 1 && zoomFactor >= targetZoomFactor) ||
-            (telescopeStep < 1 && zoomFactor <= targetZoomFactor) {
-            zoomFactor = targetZoomFactor
-            telescopeStep = 0
-            return false
-        }
-        return true
+        zoomFactor = CGFloat(animation.sample(at: clock()))
+        return animation.isActive
     }
 
     private static func clampZoom(_ factor: CGFloat) -> CGFloat {
