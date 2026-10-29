@@ -26,7 +26,7 @@ struct ZoomAnimation {
                 steps += 1
             }
         }
-        if firstStepWasImmediate, steps > 0 {
+        if firstStepWasImmediate, steps > 1 {
             steps -= 1
         }
         // Match PowerToys' 40 ms telescope cadence extended by 50 percent.
