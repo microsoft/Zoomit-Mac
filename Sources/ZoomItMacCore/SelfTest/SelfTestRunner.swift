@@ -351,6 +351,23 @@ public enum SelfTestRunner {
             normalRelease.requestFinalization() == .stopAudio,
             "Expected mouse-up while listening to stop audio and finalize"
         )
+
+        var earlyFinal = SnipDictationStateMachine()
+        try expect(earlyFinal.requestStart(), "Expected an early-final dictation session to start")
+        try expect(!earlyFinal.didPrepare(), "Expected early-final dictation to enter listening")
+        earlyFinal.recordFinalTranscript("recognized before release")
+        try expect(
+            earlyFinal.consumePendingFinalTranscript() == nil,
+            "Expected a final transcript to remain unpublished before mouse-up"
+        )
+        try expect(
+            earlyFinal.requestFinalization() == .stopAudio,
+            "Expected mouse-up to finalize dictation after an early final result"
+        )
+        try expect(
+            earlyFinal.consumePendingFinalTranscript() == "recognized before release",
+            "Expected mouse-up to consume the final transcript received while listening"
+        )
     }
 
     private static func testSnipDictationKeyHandling() throws {

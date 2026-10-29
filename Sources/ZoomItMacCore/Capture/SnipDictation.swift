@@ -20,6 +20,7 @@ enum SnipDictationFinalizationAction: Equatable {
 struct SnipDictationStateMachine {
     private(set) var phase: SnipDictationPhase = .idle
     private(set) var finalizationRequested = false
+    private var pendingFinalTranscript: String?
 
     mutating func requestStart() -> Bool {
         guard phase == .idle else { return false }
@@ -62,11 +63,24 @@ struct SnipDictationStateMachine {
 
     mutating func complete() {
         phase = .completed
+        pendingFinalTranscript = nil
     }
 
     mutating func cancel() {
         phase = .idle
         finalizationRequested = false
+        pendingFinalTranscript = nil
+    }
+
+    mutating func recordFinalTranscript(_ transcript: String) {
+        guard phase == .listening else { return }
+        pendingFinalTranscript = transcript
+    }
+
+    mutating func consumePendingFinalTranscript() -> String? {
+        guard finalizationRequested else { return nil }
+        defer { pendingFinalTranscript = nil }
+        return pendingFinalTranscript
     }
 }
 
@@ -333,7 +347,11 @@ final class SnipDictationSession {
         case .stopAudio:
             onBadgeChange?(.transcribing)
             stopAudioAndFinishRequest()
-            startFinalizationTimeout()
+            if let transcript = stateMachine.consumePendingFinalTranscript() {
+                complete(.success(transcript))
+            } else {
+                startFinalizationTimeout()
+            }
         case .none:
             if stateMachine.phase == .failed {
                 complete(.failure(pendingFailure ?? .message("Dictation could not start.")))
@@ -470,6 +488,10 @@ final class SnipDictationSession {
 
         if isFinal, stateMachine.phase == .finalizing {
             complete(.success(latestTranscript))
+            return
+        }
+        if isFinal, stateMachine.phase == .listening {
+            stateMachine.recordFinalTranscript(latestTranscript)
             return
         }
 
