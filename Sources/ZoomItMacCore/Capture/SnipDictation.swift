@@ -242,6 +242,66 @@ private final class SnipDictationAudioOutput: NSObject, AVCaptureAudioDataOutput
     }
 }
 
+private final class SnipDictationCapture: @unchecked Sendable {
+    private var generation: Int?
+    private var session: AVCaptureSession?
+    private var audioOutput: SnipDictationAudioOutput?
+
+    func start(
+        deviceID: String,
+        audioOutput: SnipDictationAudioOutput,
+        generation: Int,
+        sampleQueue: DispatchQueue
+    ) -> String? {
+        self.generation = generation
+        self.audioOutput = audioOutput
+
+        do {
+            let device: AVCaptureDevice?
+            if !deviceID.isEmpty, let selectedDevice = AVCaptureDevice(uniqueID: deviceID) {
+                device = selectedDevice
+            } else {
+                device = AVCaptureDevice.default(for: .audio)
+            }
+            guard let device else {
+                stop(generation: generation)
+                return "No microphone is available for snip dictation."
+            }
+
+            let session = AVCaptureSession()
+            self.session = session
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else {
+                stop(generation: generation)
+                return "The selected microphone cannot be used for dictation."
+            }
+            session.addInput(input)
+
+            let output = AVCaptureAudioDataOutput()
+            output.setSampleBufferDelegate(audioOutput, queue: sampleQueue)
+            guard session.canAddOutput(output) else {
+                stop(generation: generation)
+                return "Microphone audio could not be connected to Speech Recognition."
+            }
+            session.addOutput(output)
+            session.startRunning()
+            return nil
+        } catch {
+            stop(generation: generation)
+            return "Microphone setup failed: \(error.localizedDescription)"
+        }
+    }
+
+    func stop(generation: Int) {
+        guard self.generation == generation else { return }
+        session?.stopRunning()
+        session = nil
+        audioOutput?.finish()
+        audioOutput = nil
+        self.generation = nil
+    }
+}
+
 private struct SnipDictationRecognitionError: Sendable {
     let domain: String
     let code: Int
@@ -286,8 +346,6 @@ final class SnipDictationSession {
 
     private let permissionService: PermissionService
     private var stateMachine = SnipDictationStateMachine()
-    private var captureSession: AVCaptureSession?
-    private var audioOutput: SnipDictationAudioOutput?
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -299,6 +357,8 @@ final class SnipDictationSession {
     private var pendingFailure: SnipDictationFailure?
     private var audioEnded = false
     private var generation = 0
+    private let captureQueue = DispatchQueue(label: "com.zoomitmac.snip-dictation.capture")
+    private let capture = SnipDictationCapture()
     private let sampleQueue = DispatchQueue(label: "com.zoomitmac.snip-dictation.samples")
 
     init(permissionService: PermissionService) {
@@ -360,12 +420,13 @@ final class SnipDictationSession {
     }
 
     func cancel() {
+        let captureGeneration = generation
         generation += 1
         preparationTask?.cancel()
         preparationTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
-        stopCaptureAndEndAudio()
+        stopCaptureAndEndAudio(generation: captureGeneration)
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRelay = nil
@@ -417,16 +478,12 @@ final class SnipDictationSession {
             fail("Speech Recognition is currently unavailable.")
             return
         }
-        guard let device = AudioDevices.microphone(forID: deviceID) else {
-            fail("No microphone is available for snip dictation.")
-            return
-        }
-
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         if recognizer.supportsOnDeviceRecognition {
             request.requiresOnDeviceRecognition = true
         }
+        let audioOutput = SnipDictationAudioOutput(request: request)
 
         let relay = SnipDictationRecognitionRelay(generation: generation) { [weak self] transcript, isFinal, error, generation in
             self?.handleRecognition(
@@ -443,35 +500,26 @@ final class SnipDictationSession {
             relay.receive(result: result, error: error)
         }
 
-        do {
-            let session = AVCaptureSession()
-            let input = try AVCaptureDeviceInput(device: device)
-            guard session.canAddInput(input) else {
-                fail("The selected microphone cannot be used for dictation.")
-                return
+        captureQueue.async { [capture, sampleQueue] in
+            let failure = capture.start(
+                deviceID: deviceID,
+                audioOutput: audioOutput,
+                generation: generation,
+                sampleQueue: sampleQueue
+            )
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, generation == self.generation else { return }
+                    if let failure {
+                        self.fail(failure)
+                    } else if self.stateMachine.didPrepare() {
+                        self.onBadgeChange?(.transcribing)
+                        self.stopAudioAndFinishRequest()
+                    } else {
+                        self.onBadgeChange?(.listening)
+                    }
+                }
             }
-            session.addInput(input)
-
-            let output = AVCaptureAudioDataOutput()
-            let audioOutput = SnipDictationAudioOutput(request: request)
-            output.setSampleBufferDelegate(audioOutput, queue: sampleQueue)
-            guard session.canAddOutput(output) else {
-                fail("Microphone audio could not be connected to Speech Recognition.")
-                return
-            }
-            session.addOutput(output)
-            session.startRunning()
-            captureSession = session
-            self.audioOutput = audioOutput
-
-            if stateMachine.didPrepare() {
-                onBadgeChange?(.transcribing)
-                stopAudioAndFinishRequest()
-            } else {
-                onBadgeChange?(.listening)
-            }
-        } catch {
-            fail("Microphone setup failed: \(error.localizedDescription)")
         }
     }
 
@@ -513,17 +561,13 @@ final class SnipDictationSession {
         stopCaptureAndEndAudio()
     }
 
-    private func stopCaptureAndEndAudio() {
+    private func stopCaptureAndEndAudio(generation: Int? = nil) {
         guard !audioEnded else { return }
         audioEnded = true
-        captureSession?.stopRunning()
-        captureSession = nil
-        if let audioOutput {
-            audioOutput.finish()
-        } else {
-            recognitionRequest?.endAudio()
+        let captureGeneration = generation ?? self.generation
+        captureQueue.async { [capture] in
+            capture.stop(generation: captureGeneration)
         }
-        audioOutput = nil
     }
 
     private func startFinalizationTimeout() {
@@ -551,12 +595,13 @@ final class SnipDictationSession {
     }
 
     private func complete(_ result: Result<String, SnipDictationFailure>) {
+        let captureGeneration = generation
         generation += 1
         timeoutTask?.cancel()
         timeoutTask = nil
         preparationTask?.cancel()
         preparationTask = nil
-        stopCaptureAndEndAudio()
+        stopCaptureAndEndAudio(generation: captureGeneration)
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRelay = nil
