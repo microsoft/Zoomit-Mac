@@ -740,6 +740,9 @@ final class ZoomCanvasView: NSView {
     }
 
     func prepareForClose() {
+        if isSelectingRegion {
+            cancelRegionSnip()
+        }
         regionErrorDismissTask?.cancel()
         regionDictationSession?.cancel()
         regionDictationSession = nil
