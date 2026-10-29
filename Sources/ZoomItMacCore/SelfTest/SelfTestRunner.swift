@@ -31,6 +31,8 @@ public enum SelfTestRunner {
         try testAppInfoVersionResolution()
         try testViewportClampsZoom()
         try testViewportZoomAnimation()
+        try testZoomAnimationTimingAndEndpoints()
+        try testZoomAnimationRetargeting()
         try testViewportSourceRect()
         try testViewportContentPointMapping()
         try testViewportContentToDestinationTransform()
@@ -116,29 +118,124 @@ public enum SelfTestRunner {
     }
 
     private static func testViewportZoomAnimation() throws {
-        let controller = ZoomViewportController()
+        var time: TimeInterval = 100
+        let controller = ZoomViewportController(clock: { time })
         controller.configure(for: try makeFrame(), initialZoom: 2)
 
         controller.beginZoomInAnimation()
-        try expect(controller.zoomFactor == 1, "Expected telescope to start at 1x")
+        try expect(controller.zoomFactor == 1, "Expected animation to start at 1x")
         try expect(controller.isAnimatingZoom, "Expected zoom-in to be animating")
 
-        var steps = 0
-        while controller.advanceZoomAnimation() {
-            steps += 1
-            try expect(steps < 1000, "Zoom-in animation did not converge")
-        }
-        try expect(controller.zoomFactor == 2, "Expected telescope to reach 2x, got \(controller.zoomFactor)")
+        time += 0.21
+        try expect(controller.advanceZoomAnimation(), "Expected zoom-in to remain active at its midpoint")
+        try expect(abs(controller.zoomFactor - sqrt(2)) < 0.000001, "Expected logarithmic zoom midpoint")
+        let displayedZoom = controller.zoomFactor
+        controller.animateZoom(to: 4)
+        try expect(abs(controller.zoomFactor - displayedZoom) < 0.000001, "Expected retargeting to keep the displayed zoom")
+        time += 10
+        try expect(!controller.advanceZoomAnimation(), "Expected a delayed frame to finish zoom-in")
+        try expect(controller.zoomFactor == 4, "Expected animation to reach exactly 4x")
         try expect(!controller.isAnimatingZoom, "Expected animation to stop at target")
 
         controller.animateZoom(to: 1)
         try expect(controller.isAnimatingZoom, "Expected zoom-out to be animating")
-        steps = 0
-        while controller.advanceZoomAnimation() {
-            steps += 1
-            try expect(steps < 1000, "Zoom-out animation did not converge")
+        time += 10
+        try expect(!controller.advanceZoomAnimation(), "Expected a delayed frame to finish zoom-out")
+        try expect(controller.zoomFactor == 1, "Expected animation to reach exactly 1x")
+
+        controller.animateZoom(to: 8)
+        controller.setZoomFactor(3)
+        time += 10
+        try expect(!controller.advanceZoomAnimation(), "Expected immediate zoom to cancel animation")
+        try expect(controller.zoomFactor == 3, "Expected canceled animation not to change immediate zoom")
+
+        controller.animateZoom(to: 8)
+        controller.configure(for: try makeFrame(), initialZoom: 2)
+        time += 10
+        try expect(!controller.advanceZoomAnimation(), "Expected reconfiguration to cancel animation")
+        try expect(controller.zoomFactor == 2, "Expected reconfiguration to keep its initial zoom")
+    }
+
+    private static func testZoomAnimationTimingAndEndpoints() throws {
+        try expect(
+            abs(ZoomAnimation.duration(from: 1, to: 2, firstStepWasImmediate: true) - 0.42) < 0.000001,
+            "Expected Windows-compatible 420 ms activation"
+        )
+        try expect(
+            abs(ZoomAnimation.duration(from: 4, to: 1, firstStepWasImmediate: false) - 0.42) < 0.000001,
+            "Expected Windows-compatible 420 ms zoom-out"
+        )
+        try expect(
+            abs(ZoomAnimation.duration(from: 2, to: 1, firstStepWasImmediate: false) - 0.24) < 0.000001,
+            "Expected Windows-compatible 240 ms zoom-out"
+        )
+        try expect(ZoomAnimation.duration(from: 2, to: 2, firstStepWasImmediate: false) == 0, "Expected no duration at target")
+
+        var animation = ZoomAnimation()
+        for (start, target) in [(1.0, 32.0), (32.0, 1.0)] {
+            animation.start(from: start, to: target, at: 100, duration: 1)
+            try expect(abs(animation.sample(at: 99) - start) < 0.000001, "Expected early samples to stay at the start")
+            var previous = start
+            for step in 1...100 {
+                let zoom = animation.sample(at: 100 + Double(step) / 100)
+                try expect(zoom >= min(start, target) - 0.000001 && zoom <= max(start, target) + 0.000001, "Expected no zoom overshoot")
+                try expect(target > start ? zoom >= previous : zoom <= previous, "Expected monotonic zoom")
+                previous = zoom
+            }
+            try expect(animation.currentZoom == target && !animation.isActive, "Expected exact endpoint and completion")
         }
-        try expect(controller.zoomFactor == 1, "Expected telescope to reach 1x, got \(controller.zoomFactor)")
+
+        animation.start(from: 1, to: 16, at: 0, duration: 1)
+        let quarterScale = log(animation.sample(at: 0.25))
+        let threeQuarterScale = log(animation.sample(at: 0.75))
+        try expect(abs(quarterScale + threeQuarterScale - log(16)) < 0.000001, "Expected symmetric logarithmic easing")
+
+        var sparseFrames = ZoomAnimation()
+        sparseFrames.start(from: 1, to: 16, at: 0, duration: 1)
+        try expect(abs(sparseFrames.sample(at: 0.75) - animation.currentZoom) < 0.000001, "Expected frame-count-independent zoom")
+        try expect(sparseFrames.sample(at: 10) == 16 && !sparseFrames.isActive, "Expected delayed samples to finish without overshoot")
+
+        for target in AppSettings.zoomLevels {
+            animation.start(from: 1, to: Double(target), at: 0, duration: 1)
+            try expect(animation.targetZoom == Double(target), "Expected configured target to remain exact")
+            try expect(animation.sample(at: 1) == Double(target), "Expected configured endpoint to remain exact")
+        }
+        animation.start(from: 2, to: 4, at: 0, duration: 0)
+        try expect(!animation.isActive && animation.currentZoom == 4, "Expected zero-duration zoom to finish immediately")
+        animation.start(from: 2, to: 2, at: 0, duration: 1)
+        try expect(!animation.isActive && animation.currentZoom == 2, "Expected same-target zoom not to animate")
+    }
+
+    private static func testZoomAnimationRetargeting() throws {
+        var animation = ZoomAnimation()
+        animation.start(from: 1, to: 2, at: 0, duration: 0.28)
+        let epsilon = 0.000001
+        let beforeScale = log(animation.sample(at: 0.08 - epsilon))
+        let displayedZoom = animation.sample(at: 0.08)
+        let retargetedZoom = animation.retarget(to: 4, at: 0.08, duration: 0.32)
+        try expect(abs(retargetedZoom - displayedZoom) < 0.000001, "Expected no position jump on retarget")
+        let atScale = log(retargetedZoom)
+        let afterScale = log(animation.sample(at: 0.08 + epsilon))
+        let beforeVelocity = (atScale - beforeScale) / epsilon
+        let afterVelocity = (afterScale - atScale) / epsilon
+        try expect(abs(beforeVelocity - afterVelocity) < 0.001, "Expected same-direction retarget to preserve velocity")
+        try expect(animation.sample(at: 1) == 4, "Expected retargeted zoom to reach its endpoint")
+
+        animation.start(from: 1, to: 4, at: 0, duration: 0.4)
+        let reversalZoom = animation.retarget(to: 1, at: 0.1, duration: 0.4)
+        try expect(animation.sample(at: 0.101) <= reversalZoom, "Expected direction reversal not to move away from target")
+        try expect(animation.sample(at: 1) == 1, "Expected direction reversal to finish at 1x")
+
+        animation.start(from: 1, to: 32, at: 0, duration: 1)
+        let nearTargetStart = animation.sample(at: 0.5)
+        let nearTarget = nearTargetStart * 1.001
+        animation.retarget(to: nearTarget, at: 0.5, duration: 1)
+        for step in 1...100 {
+            let zoom = animation.sample(at: 0.5 + Double(step) / 100)
+            try expect(zoom >= nearTargetStart && zoom <= nearTarget + 0.000001, "Expected clamped retarget velocity not to overshoot")
+        }
+        animation.stop(at: 3)
+        try expect(animation.sample(at: 100) == 3 && !animation.isActive, "Expected stopped zoom not to resume")
     }
 
     private static func testViewportSourceRect() throws {

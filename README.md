@@ -28,6 +28,8 @@ brew uninstall --cask zoomit
 
 - Static zoom over a frozen ScreenCaptureKit display capture.
 - Live zoom of the running screen, with click-through interaction when not drawing.
+- Time-based, eased zoom animations for static and live zoom, with continuous
+  motion when retargeting and no slowdown from delayed animation frames.
 - Draw-without-zoom mode for annotating the screen at 1x.
 - Pen, line, rectangle, ellipse, arrow, highlighter, undo, erase, blank-screen sketch pads, and typing annotations.
 - Viewport screenshot copy/save and region snip copy/save.

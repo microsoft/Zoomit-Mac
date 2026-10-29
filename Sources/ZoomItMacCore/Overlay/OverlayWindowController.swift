@@ -16,11 +16,7 @@ final class OverlayWindowController {
     private var zoomTimer: Timer?
     private var zoomAnimationCompletion: (() -> Void)?
 
-    // ZoomIt's nominal telescope cadence is ZOOM_LEVEL_STEP_TIME (20ms), but on
-    // Windows WM_TIMER messages are coalesced and effectively fire slower, so the
-    // real animation is more deliberate. Use ~33ms (≈30fps) to match that feel
-    // while keeping ZoomIt's 1.1x/0.8x per-step factors.
-    private static let zoomStepInterval: TimeInterval = 1.0 / 30.0
+    private static let zoomFrameInterval: TimeInterval = 1.0 / 60.0
 
     init(
         userSelectedResourceAccess: UserSelectedResourceAccess,
@@ -89,11 +85,11 @@ final class OverlayWindowController {
         self.viewportController = viewportController
     }
 
-    /// Drives the viewport's telescope zoom animation, redrawing each step, and
-    /// invokes `completion` once the target zoom is reached.
     func runZoomAnimation(completion: (() -> Void)? = nil) {
         zoomTimer?.invalidate()
         zoomTimer = nil
+        zoomAnimationCompletion = nil
+        requestRedraw()
 
         guard let viewportController, viewportController.isAnimatingZoom else {
             completion?()
@@ -101,7 +97,7 @@ final class OverlayWindowController {
         }
 
         zoomAnimationCompletion = completion
-        let timer = Timer(timeInterval: Self.zoomStepInterval, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.zoomFrameInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.handleZoomTick()
             }
@@ -114,6 +110,7 @@ final class OverlayWindowController {
         guard let viewportController else {
             zoomTimer?.invalidate()
             zoomTimer = nil
+            zoomAnimationCompletion = nil
             return
         }
 

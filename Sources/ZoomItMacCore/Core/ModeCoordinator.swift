@@ -271,6 +271,9 @@ final class ModeCoordinator {
                 )
                 mode = .liveZoom
                 overlayController.updateInteractionMode(.liveZoom)
+                if settings.animateZoom {
+                    overlayController.runZoomAnimation()
+                }
 
                 // Start streaming live frames into the overlay. The stream
                 // excludes the overlay window so it is never captured back
@@ -288,10 +291,6 @@ final class ModeCoordinator {
 
                 // Enable Control+Up/Down zoom while live zoom is on screen.
                 onBeginLiveZoomNavigation?()
-
-                if settings.animateZoom {
-                    overlayController.runZoomAnimation()
-                }
             } catch {
                 stopLiveCapture()
                 presentError(error)
@@ -392,7 +391,7 @@ final class ModeCoordinator {
 
     private func applyZoom(to target: CGFloat, animate: Bool) {
         if animate {
-            viewportController.animateZoom(to: target)
+            viewportController.animateZoom(to: target, firstStepWasImmediate: mode != .liveZoom)
             overlayController.runZoomAnimation()
         } else {
             viewportController.setZoomFactor(target)
