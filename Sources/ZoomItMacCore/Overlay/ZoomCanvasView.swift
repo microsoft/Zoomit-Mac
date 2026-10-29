@@ -6,6 +6,8 @@ final class ZoomCanvasView: NSView {
     private let viewportController: ZoomViewportController
     private let annotationController: AnnotationController
     private let userSelectedResourceAccess: UserSelectedResourceAccess
+    private let settingsStore: SettingsStore
+    private let permissionService: PermissionService
     private let commandSink: (AppCommand) -> Void
     private var latestCursorLocation: CGPoint?
     private var pointerViewPoint: CGPoint = .zero
@@ -30,6 +32,13 @@ final class ZoomCanvasView: NSView {
     private var regionRect: CGRect = .zero
     private var regionCursorLease: CrosshairCursorLease?
     private var onRegionSnipFinished: (() -> Void)?
+    private var regionDictationKeyGate = SnipDictationKeyGate()
+    private var regionDictationSession: SnipDictationSession?
+    private var regionDictationBadge: SnipDictationBadge?
+    private var regionPendingDictationImage: CGImage?
+    private var regionSelectionLocked = false
+    private var regionErrorDismissTask: Task<Void, Never>?
+    private var regionDictationGeneration = 0
     private var scrollZoomAccumulator: CGFloat = 0
     private let smoothImage: Bool
 
@@ -88,6 +97,8 @@ final class ZoomCanvasView: NSView {
         annotationController: AnnotationController,
         smoothImage: Bool,
         userSelectedResourceAccess: UserSelectedResourceAccess,
+        settingsStore: SettingsStore,
+        permissionService: PermissionService,
         commandSink: @escaping (AppCommand) -> Void
     ) {
         self.capturedFrame = capturedFrame
@@ -95,6 +106,8 @@ final class ZoomCanvasView: NSView {
         self.annotationController = annotationController
         self.smoothImage = smoothImage
         self.userSelectedResourceAccess = userSelectedResourceAccess
+        self.settingsStore = settingsStore
+        self.permissionService = permissionService
         self.commandSink = commandSink
         super.init(frame: frameRect)
         // Anchor the initial zoom on the current cursor position so the view
@@ -220,8 +233,10 @@ final class ZoomCanvasView: NSView {
         pointerViewPoint = convert(event.locationInWindow, from: nil)
 
         if isSelectingRegion {
+            guard !regionSelectionLocked else { return }
             regionAnchor = pointerViewPoint
             regionRect = .zero
+            regionDictationKeyGate.beginSelection()
             needsDisplay = true
             return
         }
@@ -262,7 +277,9 @@ final class ZoomCanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         pointerViewPoint = convert(event.locationInWindow, from: nil)
         if isSelectingRegion {
+            guard !regionSelectionLocked else { return }
             updateRegionRect(to: pointerViewPoint)
+            regionDictationKeyGate.noteDrag()
             needsDisplay = true
             return
         }
@@ -279,6 +296,8 @@ final class ZoomCanvasView: NSView {
         }
         pointerViewPoint = convert(event.locationInWindow, from: nil)
         if isSelectingRegion {
+            guard !regionSelectionLocked else { return }
+            regionDictationKeyGate.endDrag()
             finishRegionSnip()
             return
         }
@@ -378,9 +397,24 @@ final class ZoomCanvasView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if isSelectingRegion {
-            // Only Escape (cancel) is honoured while selecting a snip region.
             if event.keyCode == 53 {
                 cancelRegionSnip()
+            } else {
+                let dictationEnabled = settingsStore.load().snipDictationEnabled
+                let isClipboardSnip: Bool
+                if case .copyImage = regionAction {
+                    isClipboardSnip = true
+                } else {
+                    isClipboardSnip = false
+                }
+                if regionDictationKeyGate.shouldStart(
+                    keyCode: event.keyCode,
+                    isRepeat: event.isARepeat,
+                    isEnabled: dictationEnabled,
+                    isClipboardSnip: isClipboardSnip
+                ) {
+                    startRegionDictation()
+                }
             }
             return
         }
@@ -706,6 +740,13 @@ final class ZoomCanvasView: NSView {
     }
 
     func prepareForClose() {
+        if isSelectingRegion {
+            cancelRegionSnip()
+        }
+        regionErrorDismissTask?.cancel()
+        regionDictationSession?.cancel()
+        regionDictationSession = nil
+        popRegionCursor()
         stopLiveMouseTracking()
         stopDrawingRightClickMonitor()
         showSystemCursor()
@@ -852,6 +893,15 @@ final class ZoomCanvasView: NSView {
 
     /// Begins selecting a rectangle of the current viewport to copy or save.
     func beginRegionSnip(action: SnipAction, onFinished: @escaping () -> Void) {
+        regionErrorDismissTask?.cancel()
+        regionErrorDismissTask = nil
+        regionDictationSession?.cancel()
+        regionDictationSession = nil
+        regionPendingDictationImage = nil
+        regionDictationBadge = nil
+        regionSelectionLocked = false
+        regionDictationKeyGate.beginSelection()
+        regionDictationGeneration += 1
         regionAction = action
         onRegionSnipFinished = onFinished
         regionAnchor = nil
@@ -879,34 +929,71 @@ final class ZoomCanvasView: NSView {
     private func finishRegionSnip() {
         let rect = regionRect
         let action = regionAction
+        guard !regionSelectionLocked else { return }
+        regionDictationKeyGate.endDrag()
+
+        guard rect.width >= 3, rect.height >= 3 else {
+            cancelRegionSnip()
+            return
+        }
+
+        // Capture without the dimming/border UI, then restore it if dictation
+        // must remain visible while Speech Recognition finalizes.
         isSelectingRegion = false
+        needsDisplay = true
+        displayIfNeeded()
+        guard let full = captureViewportImage() else {
+            endRegionSnip()
+            return
+        }
+        let scale = window?.backingScaleFactor ?? capturedFrame.display.scaleFactor
+        let pixelRect = CGRect(
+            x: rect.minX * scale,
+            y: rect.minY * scale,
+            width: rect.width * scale,
+            height: rect.height * scale
+        ).integral
+        guard let cropped = full.cropping(to: pixelRect) else {
+            endRegionSnip()
+            return
+        }
+
+        if case .copyImage = action, let regionDictationSession {
+            isSelectingRegion = true
+            regionSelectionLocked = true
+            regionAnchor = nil
+            regionPendingDictationImage = cropped
+            popRegionCursor()
+            needsDisplay = true
+            regionDictationSession.stopAndFinalize { [weak self] result in
+                self?.completeRegionDictation(result)
+            }
+            return
+        }
+
         regionRect = .zero
         regionAnchor = nil
         popRegionCursor()
-
-        if rect.width >= 3, rect.height >= 3, let full = captureViewportImage() {
-            let scale = window?.backingScaleFactor ?? capturedFrame.display.scaleFactor
-            let pixelRect = CGRect(
-                x: rect.minX * scale,
-                y: rect.minY * scale,
-                width: rect.width * scale,
-                height: rect.height * scale
-            ).integral
-            if let cropped = full.cropping(to: pixelRect) {
-                switch action {
-                case .saveImage:
-                    presentSavePanelOverOverlay(cropped)
-                case .copyImage:
-                    ImageExporter.copyToPasteboard(cropped)
-                case .recognizeText:
-                    OcrService.recognizeAndCopy(cropped)
-                }
-            }
+        switch action {
+        case .saveImage:
+            presentSavePanelOverOverlay(cropped)
+        case .copyImage:
+            ImageExporter.copyToPasteboard(cropped)
+        case .recognizeText:
+            OcrService.recognizeAndCopy(cropped)
         }
         endRegionSnip()
     }
 
     private func cancelRegionSnip() {
+        regionDictationGeneration += 1
+        regionErrorDismissTask?.cancel()
+        regionErrorDismissTask = nil
+        regionDictationSession?.cancel()
+        regionDictationSession = nil
+        regionPendingDictationImage = nil
+        regionDictationBadge = nil
+        regionSelectionLocked = false
         isSelectingRegion = false
         regionRect = .zero
         regionAnchor = nil
@@ -915,6 +1002,17 @@ final class ZoomCanvasView: NSView {
     }
 
     private func endRegionSnip() {
+        regionErrorDismissTask?.cancel()
+        regionErrorDismissTask = nil
+        regionDictationSession?.cancel()
+        regionDictationSession = nil
+        regionPendingDictationImage = nil
+        regionDictationBadge = nil
+        regionSelectionLocked = false
+        isSelectingRegion = false
+        regionRect = .zero
+        regionAnchor = nil
+        popRegionCursor()
         needsDisplay = true
         if interactionMode == .liveZoom {
             updateLiveZoomInteractivity()
@@ -924,6 +1022,37 @@ final class ZoomCanvasView: NSView {
         let callback = onRegionSnipFinished
         onRegionSnipFinished = nil
         callback?()
+    }
+
+    private func startRegionDictation() {
+        guard regionDictationSession == nil else { return }
+        let session = SnipDictationSession(permissionService: permissionService)
+        session.onBadgeChange = { [weak self] badge in
+            self?.regionDictationBadge = badge
+            self?.needsDisplay = true
+        }
+        regionDictationSession = session
+        session.start(deviceID: settingsStore.load().microphoneDeviceID)
+    }
+
+    private func completeRegionDictation(_ result: Result<String, SnipDictationFailure>) {
+        guard let image = regionPendingDictationImage else { return }
+        switch result {
+        case .success(let transcript):
+            let normalized = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            ImageExporter.copyToPasteboard(image, transcript: normalized)
+            endRegionSnip()
+        case .failure(let failure):
+            regionDictationBadge = .error(failure.message)
+            needsDisplay = true
+            let generation = regionDictationGeneration
+            regionErrorDismissTask?.cancel()
+            regionErrorDismissTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self, self.regionDictationGeneration == generation else { return }
+                self.endRegionSnip()
+            }
+        }
     }
 
     private func pushRegionCursor() {
@@ -955,6 +1084,10 @@ final class ZoomCanvasView: NSView {
         context.setStrokeColor(NSColor.white.cgColor)
         context.setLineWidth(1)
         context.stroke(regionRect.insetBy(dx: 0.5, dy: 0.5))
+
+        if let regionDictationBadge {
+            SnipDictationBadgeLayout.draw(regionDictationBadge, selection: regionRect, in: bounds)
+        }
     }
 
     private func drawCursorIndicator(in context: CGContext, source: CGRect) {

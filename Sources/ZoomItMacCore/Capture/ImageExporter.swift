@@ -7,16 +7,60 @@ import UniformTypeIdentifiers
 enum ImageExporter {
     /// Copies the image to the general pasteboard as PNG and TIFF so it can be
     /// pasted into the widest range of apps.
-    static func copyToPasteboard(_ image: CGImage) {
-        let rep = NSBitmapImageRep(cgImage: image)
-        let pasteboard = NSPasteboard.general
+    static func copyToPasteboard(
+        _ image: CGImage,
+        transcript: String = "",
+        pasteboard: NSPasteboard = .general
+    ) {
+        guard let item = makePasteboardItem(image: image, transcript: transcript) else { return }
         pasteboard.clearContents()
-        if let png = rep.representation(using: .png, properties: [:]) {
-            pasteboard.setData(png, forType: .png)
-        }
+        pasteboard.writeObjects([item])
+    }
+
+    /// Builds one pasteboard item with image fallbacks. When the transcript is
+    /// non-empty, the same item also carries rich RTFD/HTML representations
+    /// containing both the image and text plus a plain-text fallback.
+    static func makePasteboardItem(image: CGImage, transcript: String) -> NSPasteboardItem? {
+        let rep = NSBitmapImageRep(cgImage: image)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
+
+        let item = NSPasteboardItem()
+        item.setData(png, forType: .png)
         if let tiff = rep.tiffRepresentation {
-            pasteboard.setData(tiff, forType: .tiff)
+            item.setData(tiff, forType: .tiff)
         }
+
+        guard !transcript.isEmpty else { return item }
+
+        let attachment = NSTextAttachment(data: png, ofType: UTType.png.identifier)
+        let richText = NSMutableAttributedString(
+            attributedString: NSAttributedString(attachment: attachment)
+        )
+        richText.append(NSAttributedString(string: "\n\(transcript)"))
+        let fullRange = NSRange(location: 0, length: richText.length)
+        if let rtfd = try? richText.data(
+            from: fullRange,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd]
+        ) {
+            item.setData(rtfd, forType: .rtfd)
+        }
+
+        let escapedTranscript = escapeHTML(transcript).replacingOccurrences(of: "\n", with: "<br>")
+        let html = """
+        <div><img alt="Snip" src="data:image/png;base64,\(png.base64EncodedString())"><p>\(escapedTranscript)</p></div>
+        """
+        item.setString(html, forType: .html)
+        item.setString(transcript, forType: .string)
+        return item
+    }
+
+    private static func escapeHTML(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 
     /// Saves the image according to the user's snip preferences: optionally

@@ -30,7 +30,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let userSelectedResourceAccess = UserDefaultsUserSelectedResourceAccess()
         let displayManager = SystemDisplayManager()
         let captureService = ScreenCaptureKitCaptureService(displayManager: displayManager)
-        let overlayController = OverlayWindowController(userSelectedResourceAccess: userSelectedResourceAccess)
+        let overlayController = OverlayWindowController(
+            userSelectedResourceAccess: userSelectedResourceAccess,
+            settingsStore: settingsStore,
+            permissionService: permissionService
+        )
         let annotationController = AnnotationController()
         let viewportController = ZoomViewportController()
 

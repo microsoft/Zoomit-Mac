@@ -26,6 +26,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     private let onSuspendHotkeys: () -> Void
     private let onResumeHotkeys: () -> Void
     private let onRequestMicrophone: () -> Void
+    private let onRequestSpeechRecognition: () -> Void
     private let onRequestCamera: () -> Void
     private let onOpenTrimEditor: () -> Void
     private let userSelectedResourceAccess: UserSelectedResourceAccess
@@ -55,10 +56,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     private weak var launchAtLoginCheckbox: NSButton?
 
     // Record tab controls.
-    private weak var microphonePopup: NSPopUpButton?
+    private weak var recordMicrophonePopup: NSPopUpButton?
     private weak var noiseCancellationCheckbox: NSButton?
 
     // Snip tab controls.
+    private weak var snipMicrophonePopup: NSPopUpButton?
     private weak var snipSaveDirectoryField: NSTextField?
     private weak var snipSaveDirectoryBrowseButton: NSButton?
 
@@ -118,6 +120,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         onSuspendHotkeys: @escaping () -> Void,
         onResumeHotkeys: @escaping () -> Void,
         onRequestMicrophone: @escaping () -> Void,
+        onRequestSpeechRecognition: @escaping () -> Void,
         onRequestCamera: @escaping () -> Void,
         onOpenTrimEditor: @escaping () -> Void,
         userSelectedResourceAccess: UserSelectedResourceAccess
@@ -127,6 +130,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         self.onSuspendHotkeys = onSuspendHotkeys
         self.onResumeHotkeys = onResumeHotkeys
         self.onRequestMicrophone = onRequestMicrophone
+        self.onRequestSpeechRecognition = onRequestSpeechRecognition
         self.onRequestCamera = onRequestCamera
         self.onOpenTrimEditor = onOpenTrimEditor
         self.userSelectedResourceAccess = userSelectedResourceAccess
@@ -1332,6 +1336,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
 
             To capture part of the screen at any time, press the snip shortcut and drag a rectangle. Releasing the drag copies the selected region to the clipboard. Hold Shift with the shortcut to save the region to a file instead. Press Escape to cancel.
 
+            When snip dictation is enabled, press Space once while actively dragging a clipboard snip to record speech. Recording continues through mouse-up while ZoomIt transcribes; press Escape to cancel without replacing the clipboard.
+
             The OCR shortcut works the same way, but recognizes the text in the selected region and copies that text to the clipboard.
 
             Saved images are PNG files named with the current date and time.
@@ -1352,6 +1358,17 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         snipOcrHotKeyButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
         self.snipOcrHotKeyButton = snipOcrHotKeyButton
         let snipOcrHotKeyRow = makeRow([makeLabel("Text Toggle:"), snipOcrHotKeyButton])
+
+        let dictationCheck = makeCheckbox(
+            "Enable dictation during clipboard snips:",
+            action: #selector(snipDictationChanged(_:)),
+            state: settings.snipDictationEnabled
+        )
+        let dictationMicrophonePopup = makeMicrophonePopup(enabled: settings.snipDictationEnabled)
+        snipMicrophonePopup = dictationMicrophonePopup
+        let dictationMicrophoneRow = makeIndentedColumn([
+            makeRow([makeLabel("Dictation microphone:"), dictationMicrophonePopup])
+        ])
 
         let copyOnSaveCheck = makeCheckbox(
             "Also copy to clipboard when saving to a file:",
@@ -1377,7 +1394,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
 
         updateSnipSaveDirectoryControlsEnabled()
 
-        return makeColumn([help, snipHotKeyRow, snipOcrHotKeyRow, makeCheckboxColumn([copyOnSaveCheck, saveToDirectoryCheck]), directoryRow])
+        return makeColumn([
+            help,
+            snipHotKeyRow,
+            snipOcrHotKeyRow,
+            makeCheckboxColumn([dictationCheck]),
+            dictationMicrophoneRow,
+            makeCheckboxColumn([copyOnSaveCheck, saveToDirectoryCheck]),
+            directoryRow
+        ])
     }
 
     private func snipSaveDirectoryDisplayPath() -> String {
@@ -1395,6 +1420,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     @objc private func copySnipToClipboardOnSaveChanged(_ sender: NSButton) {
         settings.copySnipToClipboardOnSave = (sender.state == .on)
         persist()
+    }
+
+    @objc private func snipDictationChanged(_ sender: NSButton) {
+        settings.snipDictationEnabled = (sender.state == .on)
+        updateMicrophoneOptionControls()
+        persist()
+        if settings.snipDictationEnabled {
+            onRequestSpeechRecognition()
+        }
     }
 
     @objc private func saveSnipToDirectoryChanged(_ sender: NSButton) {
@@ -1444,23 +1478,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         let windNoiseCheck = makeCheckbox("Noise cancellation:", action: #selector(recordNoiseCancellationChanged(_:)), state: settings.recordNoiseCancellation)
         noiseCancellationCheckbox = windNoiseCheck
 
-        let micPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        micPopup.translatesAutoresizingMaskIntoConstraints = false
-        let microphones = AudioDevices.availableMicrophones()
-        var selectedIndex = 0
-        for (index, device) in microphones.enumerated() {
-            micPopup.addItem(withTitle: device.name)
-            micPopup.lastItem?.representedObject = device.id
-            if device.id == settings.microphoneDeviceID {
-                selectedIndex = index
-            }
-        }
-        micPopup.selectItem(at: selectedIndex)
-        micPopup.target = self
-        micPopup.action = #selector(microphoneChanged(_:))
-        micPopup.isEnabled = settings.recordMicrophone
-        micPopup.widthAnchor.constraint(equalToConstant: 220).isActive = true
-        microphonePopup = micPopup
+        let micPopup = makeMicrophonePopup(enabled: settings.recordMicrophone)
+        recordMicrophonePopup = micPopup
         let micDeviceRow = makeRow([makeLabel("Microphone:"), micPopup])
         let micOptions = makeIndentedColumn([windNoiseCheck, micDeviceRow])
         updateMicrophoneOptionControls()
@@ -1548,6 +1567,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
 
     @objc private func microphoneChanged(_ sender: NSPopUpButton) {
         settings.microphoneDeviceID = (sender.selectedItem?.representedObject as? String) ?? ""
+        synchronizeMicrophonePopups()
         updateMicrophoneOptionControls()
         persist()
     }
@@ -1558,7 +1578,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
     }
 
     private func updateMicrophoneOptionControls() {
-        microphonePopup?.isEnabled = settings.recordMicrophone
+        recordMicrophonePopup?.isEnabled = settings.recordMicrophone
+        snipMicrophonePopup?.isEnabled = settings.snipDictationEnabled
         let supported = settings.recordMicrophone && AudioDevices.supportsWindNoiseRemoval(deviceID: settings.microphoneDeviceID)
         noiseCancellationCheckbox?.title = supported ? "Noise cancellation:" : "Noise cancellation (not supported by selected microphone):"
         noiseCancellationCheckbox?.isEnabled = supported
@@ -1566,6 +1587,38 @@ final class SettingsWindowController: NSObject, NSWindowDelegate, NSTableViewDat
         noiseCancellationCheckbox?.toolTip = supported
             ? "Uses AVFoundation wind noise removal for the selected microphone."
             : "Wind noise removal requires macOS 15 and a microphone that supports it."
+    }
+
+    private func makeMicrophonePopup(enabled: Bool) -> NSPopUpButton {
+        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        let microphones = AudioDevices.availableMicrophones()
+        var selectedIndex = 0
+        for (index, device) in microphones.enumerated() {
+            popup.addItem(withTitle: device.name)
+            popup.lastItem?.representedObject = device.id
+            if device.id == settings.microphoneDeviceID {
+                selectedIndex = index
+            }
+        }
+        popup.selectItem(at: selectedIndex)
+        popup.target = self
+        popup.action = #selector(microphoneChanged(_:))
+        popup.isEnabled = enabled
+        popup.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        return popup
+    }
+
+    private func synchronizeMicrophonePopups() {
+        for popup in [recordMicrophonePopup, snipMicrophonePopup].compactMap({ $0 }) {
+            if let item = popup.itemArray.first(where: {
+                ($0.representedObject as? String) == settings.microphoneDeviceID
+            }) {
+                popup.select(item)
+            } else {
+                popup.selectItem(at: 0)
+            }
+        }
     }
 
     @objc private func openTrimEditor(_ sender: NSButton) {

@@ -181,7 +181,9 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
     <key>NSCameraUsageDescription</key>
     <string>ZoomIt shows your webcam as a picture-in-picture overlay when you enable it for screen recordings.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>ZoomIt records your microphone when you enable microphone capture for screen recordings.</string>
+    <string>ZoomIt uses your microphone for enabled screen recording audio and optional snip dictation.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>ZoomIt transcribes speech you record while dragging a snip when snip dictation is enabled.</string>
     <key>ZoomItDistribution</key>
     <string>$DIST_DISTRIBUTION</string>
 </dict>
