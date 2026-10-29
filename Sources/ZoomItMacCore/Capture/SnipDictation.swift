@@ -509,7 +509,9 @@ final class SnipDictationSession {
             )
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
-                    guard let self, generation == self.generation else { return }
+                    guard let self,
+                          generation == self.generation,
+                          self.stateMachine.phase == .preparing || self.stateMachine.phase == .finalizing else { return }
                     if let failure {
                         self.fail(failure)
                     } else if self.stateMachine.didPrepare() {
